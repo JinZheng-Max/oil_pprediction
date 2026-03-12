@@ -1,0 +1,928 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Citi-OilNet | 油价风险预警与对冲策略引擎</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- 
+    <!-- Chosen Palette: Citi Financial Premium (Deep Blue, Slate Gray, Clean White, Semantic Risk Colors) -->
+    <!-- Application Structure Plan: 
+         采用经典的“控制台-仪表盘”双栏布局结构。
+         左侧固定边栏包含所有交互输入（情景选择、风险滑块、模拟触发器），作为“操作区”。
+         右侧为主内容区，采用选项卡结构（概览、历史、策略），作为“展示与分析区”。
+         这种结构确保用户可以随时调整参数并立即在右侧看到多维度的分析结果，符合金融分析师的高效探索习惯。
+    -->
+    <!-- Visualization & Content Choices: 
+         1. 核心指标 (动态卡片) -> 目标：快速告知 -> 使用 HTML/CSS 卡片 + JS数字滚动动画 -> 直观展示价格、风险和VaR。
+         2. 价格预测轨迹 (折线图) -> 目标：展示趋势与不确定性 -> 使用 Chart.js (Canvas) 带有渐变置信区间填充 -> 清晰展示中枢预测及上下界。
+         3. 风险因子雷达 (雷达图) -> 目标：多维比较 -> 使用 Chart.js (Canvas) -> 直观对比地缘、供需、情绪等多维度风险分布。
+         4. 策略推荐 (数据表+徽章) -> 目标：指导行动 -> 使用带排序和过滤功能的 HTML/Tailwind 表格 -> 结构化提供可执行的期权/期货操作建议。
+         CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. 
+    -->
+    -->
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        citi: {
+                            blue: '#003B70',       // 花旗主蓝
+                            light: '#E6F0F9',      // 浅蓝背景
+                            accent: '#00B4E5',     // 亮蓝强调
+                            dark: '#00284D',       // 深蓝加深
+                            pale: '#F8FAFC',       // 极浅背景
+                        },
+                        risk: {
+                            high: '#EF4444',       // 高风险红
+                            mid: '#F59E0B',        // 中风险橙
+                            low: '#10B981',        // 低风险绿
+                            neutral: '#64748B'     // 中性灰
+                        }
+                    },
+                    boxShadow: {
+                        'premium': '0 4px 20px -2px rgba(0, 0, 0, 0.05)',
+                        'premium-hover': '0 10px 30px -5px rgba(0, 59, 112, 0.12)',
+                        'inner-light': 'inset 0 2px 4px 0 rgba(255, 255, 255, 0.3)',
+                    },
+                    animation: {
+                        'fade-in': 'fadeIn 0.4s ease-out forwards',
+                        'slide-up': 'slideUp 0.5s ease-out forwards',
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    },
+                    keyframes: {
+                        fadeIn: {
+                            '0%': { opacity: '0' },
+                            '100%': { opacity: '1' },
+                        },
+                        slideUp: {
+                            '0%': { opacity: '0', transform: 'translateY(10px)' },
+                            '100%': { opacity: '1', transform: 'translateY(0)' },
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* 定制滚动条 */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+
+        /* 定制范围滑块 (Range Slider) */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 18px; width: 18px;
+            border-radius: 50%;
+            background: #003B70;
+            cursor: pointer;
+            margin-top: -6px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            transition: transform 0.1s;
+        }
+        input[type=range]::-webkit-slider-thumb:hover {
+            transform: scale(1.15);
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%; height: 6px;
+            cursor: pointer;
+            background: #E2E8F0;
+            border-radius: 3px;
+        }
+        input[type=range]:focus { outline: none; }
+
+        /* 图表容器约束 */
+        .chart-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            min-height: 280px;
+        }
+
+        /* 隐藏的Tab内容 */
+        .tab-content { display: none; }
+        .tab-content.active { display: block; animation: fadeIn 0.4s ease-out forwards; }
+
+        /* 全局平滑滚动 */
+        html { scroll-behavior: smooth; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 h-screen flex overflow-hidden">
+
+    <!-- 左侧控制台边栏 -->
+    <aside class="w-80 bg-white border-r border-slate-200 flex flex-col z-20 shadow-[1px_0_15px_rgba(0,0,0,0.02)] hidden md:flex">
+        <!-- Logo区 -->
+        <div class="h-16 flex items-center px-6 border-b border-slate-100 bg-citi-blue text-white shrink-0">
+            <i class="fa-solid fa-chart-line text-xl mr-3"></i>
+            <div>
+                <h1 class="font-bold text-lg tracking-wide">Citi-OilNet</h1>
+                <p class="text-[10px] text-blue-200 opacity-80 uppercase tracking-wider">Risk & Hedging Engine</p>
+            </div>
+        </div>
+
+        <!-- 控制面板 -->
+        <div class="flex-1 overflow-y-auto p-6 space-y-8">
+            
+            <!-- 情景选择 -->
+            <div>
+                <h3 class="text-sm font-semibold text-slate-800 mb-3 flex items-center">
+                    <i class="fa-solid fa-globe text-citi-accent w-5"></i> 宏观情景假设
+                </h3>
+                <div class="space-y-2">
+                    <label class="flex items-center p-3 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-50 transition-colors group">
+                        <input type="radio" name="scenario" value="base" checked class="w-4 h-4 text-citi-blue focus:ring-citi-blue cursor-pointer">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-slate-700 group-hover:text-citi-blue transition-colors">基准延续 (Base)</span>
+                            <span class="block text-xs text-slate-400">当前宏观趋势的自然外推</span>
+                        </div>
+                    </label>
+                    <label class="flex items-center p-3 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-50 transition-colors group">
+                        <input type="radio" name="scenario" value="geopolitics" class="w-4 h-4 text-citi-blue focus:ring-citi-blue cursor-pointer">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-slate-700 group-hover:text-citi-blue transition-colors">地缘危机 (Crisis)</span>
+                            <span class="block text-xs text-slate-400">中东冲突升级，航道受阻</span>
+                        </div>
+                    </label>
+                    <label class="flex items-center p-3 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-50 transition-colors group">
+                        <input type="radio" name="scenario" value="demand_slump" class="w-4 h-4 text-citi-blue focus:ring-citi-blue cursor-pointer">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-slate-700 group-hover:text-citi-blue transition-colors">需求衰退 (Slump)</span>
+                            <span class="block text-xs text-slate-400">主要经济体进入深度衰退</span>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <hr class="border-slate-100">
+
+            <!-- 连续参数调节 -->
+            <div class="space-y-6">
+                <h3 class="text-sm font-semibold text-slate-800 mb-2 flex items-center">
+                    <i class="fa-solid fa-sliders text-citi-accent w-5"></i> 多源感知因子微调
+                </h3>
+                
+                <!-- 地缘风险指数 -->
+                <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                    <div class="flex justify-between items-end mb-2">
+                        <label class="text-xs font-medium text-slate-600">中东地缘烈度 (GPR)</label>
+                        <span id="geoValueLabel" class="text-xs font-bold font-mono px-2 py-0.5 rounded-md bg-white border border-slate-200">0.50</span>
+                    </div>
+                    <input type="range" id="geoSlider" min="0" max="100" value="50" class="w-full">
+                    <div class="flex justify-between text-[10px] text-slate-400 mt-1 font-medium">
+                        <span>和平</span>
+                        <span>局部冲突</span>
+                        <span>全面战争</span>
+                    </div>
+                </div>
+
+                <!-- 市场情绪指数 -->
+                <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                    <div class="flex justify-between items-end mb-2">
+                        <label class="text-xs font-medium text-slate-600">NLP 市场情绪 (Sentiment)</label>
+                        <span id="sentimentValueLabel" class="text-xs font-bold font-mono px-2 py-0.5 rounded-md bg-white border border-slate-200">0.50</span>
+                    </div>
+                    <input type="range" id="sentimentSlider" min="0" max="100" value="50" class="w-full">
+                    <div class="flex justify-between text-[10px] text-slate-400 mt-1 font-medium">
+                        <span class="text-risk-high">极度恐慌</span>
+                        <span>中性</span>
+                        <span class="text-risk-low">极度乐观</span>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- 底部运行按钮 -->
+        <div class="p-6 border-t border-slate-200 bg-slate-50">
+            <button id="runSimBtn" onclick="runSimulation()" class="w-full bg-citi-blue hover:bg-citi-dark text-white rounded-lg py-3.5 px-4 font-semibold shadow-md hover:shadow-lg transition-all transform active:scale-[0.98] flex justify-center items-center group relative overflow-hidden">
+                <div class="absolute inset-0 w-full h-full bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full group-hover:animate-[shimmer_1.5s_infinite]"></div>
+                <i id="btnIcon" class="fa-solid fa-play mr-2"></i>
+                <i id="btnSpinner" class="fa-solid fa-circle-notch fa-spin mr-2 hidden"></i>
+                <span id="btnText">运行引擎推演</span>
+            </button>
+            <p class="text-center text-[10px] text-slate-400 mt-3">基于蒙特卡洛与LSTM混合模型测算</p>
+        </div>
+    </aside>
+
+    <!-- 右侧主内容区 -->
+    <main class="flex-1 flex flex-col h-full bg-[#F8FAFC] relative">
+        
+        <!-- 全局加载遮罩 (微交互) -->
+        <div id="mainLoader" class="absolute inset-0 bg-white/60 backdrop-blur-sm z-10 hidden flex-col justify-center items-center transition-opacity">
+            <div class="w-16 h-16 border-4 border-citi-light border-t-citi-blue rounded-full animate-spin"></div>
+            <p class="mt-4 text-sm font-medium text-citi-blue animate-pulse">正在重新计算风险暴露与预测模型...</p>
+        </div>
+
+        <!-- 顶部导航条 -->
+        <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 shrink-0 shadow-sm z-0">
+            <!-- 移动端菜单按钮 -->
+            <button class="md:hidden text-slate-500 hover:text-citi-blue">
+                <i class="fa-solid fa-bars text-xl"></i>
+            </button>
+            
+            <!-- 选项卡导航 -->
+            <nav class="flex space-x-1" id="mainTabs">
+                <button onclick="switchTab('dashboard')" class="tab-btn active px-4 py-2 text-sm font-medium rounded-md text-citi-blue bg-citi-light transition-colors" data-target="dashboard">
+                    <i class="fa-solid fa-chart-pie mr-1.5"></i> 核心预警仪表盘
+                </button>
+                <button onclick="switchTab('history')" class="tab-btn px-4 py-2 text-sm font-medium rounded-md text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors" data-target="history">
+                    <i class="fa-solid fa-clock-rotate-left mr-1.5"></i> 历史极值回溯
+                </button>
+                <button onclick="switchTab('strategy')" class="tab-btn px-4 py-2 text-sm font-medium rounded-md text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors" data-target="strategy">
+                    <i class="fa-solid fa-chess-knight mr-1.5"></i> 智能对冲策略
+                </button>
+            </nav>
+
+            <div class="text-xs font-medium text-slate-400 flex items-center">
+                <span class="w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse-slow"></span>
+                模型状态: 实时连接
+            </div>
+        </header>
+
+        <!-- 滚动内容区 -->
+        <div class="flex-1 overflow-auto p-4 md:p-8">
+            
+            <!-- TAB 1: 仪表盘概览 -->
+            <div id="dashboard" class="tab-content active space-y-6 animate-fade-in">
+                
+                <!-- 模块介绍 -->
+                <div class="mb-6">
+                    <h2 class="text-xl font-bold text-slate-800">实时风险暴露预估</h2>
+                    <p class="text-sm text-slate-500 mt-1">本模块聚合多源感知数据（宏观经济、地缘冲突NLP提取、供应链状态），输出未来30天内的布伦特原油价格走势及在险价值(VaR)，辅助快速掌握核心风险敞口。</p>
+                </div>
+
+                <!-- 核心指标卡片组 (顶部KPI) -->
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <!-- KPI 1 -->
+                    <div class="bg-white rounded-xl p-5 shadow-premium hover:shadow-premium-hover transition-shadow border border-slate-100 flex flex-col justify-between group">
+                        <div class="flex justify-between items-start">
+                            <span class="text-sm font-medium text-slate-500">T+30 预测均价</span>
+                            <div class="w-8 h-8 rounded-lg bg-blue-50 text-citi-blue flex items-center justify-center group-hover:bg-citi-blue group-hover:text-white transition-colors">
+                                <i class="fa-solid fa-dollar-sign"></i>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex items-baseline">
+                            <span class="text-3xl font-bold text-slate-800 font-mono" id="kpi-price">85.42</span>
+                            <span class="text-sm ml-2 font-medium text-risk-high" id="kpi-price-change"><i class="fa-solid fa-arrow-up text-[10px]"></i> +3.2%</span>
+                        </div>
+                    </div>
+                    
+                    <!-- KPI 2 -->
+                    <div class="bg-white rounded-xl p-5 shadow-premium hover:shadow-premium-hover transition-shadow border border-slate-100 flex flex-col justify-between group">
+                        <div class="flex justify-between items-start">
+                            <span class="text-sm font-medium text-slate-500">波动率预期 (VIX)</span>
+                            <div class="w-8 h-8 rounded-lg bg-orange-50 text-orange-500 flex items-center justify-center group-hover:bg-orange-500 group-hover:text-white transition-colors">
+                                <i class="fa-solid fa-bolt"></i>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex items-baseline">
+                            <span class="text-3xl font-bold text-slate-800 font-mono" id="kpi-volatility">24.5</span>
+                            <span class="text-sm ml-1 text-slate-500">%</span>
+                        </div>
+                    </div>
+
+                    <!-- KPI 3 -->
+                    <div class="bg-white rounded-xl p-5 shadow-premium hover:shadow-premium-hover transition-shadow border border-slate-100 flex flex-col justify-between group">
+                        <div class="flex justify-between items-start">
+                            <span class="text-sm font-medium text-slate-500">95% VaR (在险价值)</span>
+                            <div class="w-8 h-8 rounded-lg bg-red-50 text-red-500 flex items-center justify-center group-hover:bg-red-500 group-hover:text-white transition-colors">
+                                <i class="fa-solid fa-shield-halved"></i>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex items-baseline">
+                            <span class="text-3xl font-bold text-slate-800 font-mono" id="kpi-var">-$4.2</span>
+                            <span class="text-sm ml-2 font-medium text-slate-400">/ 桶</span>
+                        </div>
+                    </div>
+
+                    <!-- KPI 4 -->
+                    <div class="bg-white rounded-xl p-5 shadow-premium hover:shadow-premium-hover transition-shadow border border-slate-100 flex flex-col justify-between group">
+                        <div class="flex justify-between items-start">
+                            <span class="text-sm font-medium text-slate-500">综合风险预警级别</span>
+                            <div class="w-8 h-8 rounded-lg bg-slate-100 text-slate-500 flex items-center justify-center">
+                                <i class="fa-solid fa-bell"></i>
+                            </div>
+                        </div>
+                        <div class="mt-4">
+                            <span id="kpi-risk-badge" class="inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold bg-orange-100 text-orange-700 border border-orange-200">
+                                中度风险 (Amber)
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 图表区域 -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <!-- 左侧：主预测折线图 -->
+                    <div class="bg-white p-6 rounded-xl shadow-premium border border-slate-100 lg:col-span-2 flex flex-col">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="font-semibold text-slate-800">未来90天价格轨迹测算 (Brent)</h3>
+                            <button class="text-xs text-citi-accent hover:text-citi-dark transition-colors"><i class="fa-solid fa-download"></i> 导出数据</button>
+                        </div>
+                        <div class="flex-1 chart-container min-h-[350px]">
+                            <canvas id="priceForecastChart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- 右侧：风险因子拆解 -->
+                    <div class="bg-white p-6 rounded-xl shadow-premium border border-slate-100 flex flex-col">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="font-semibold text-slate-800">动态风险因子归因</h3>
+                        </div>
+                        <div class="flex-1 chart-container flex items-center justify-center min-h-[350px]">
+                            <canvas id="riskFactorChart"></canvas>
+                        </div>
+                        <p class="text-[10px] text-center text-slate-400 mt-2">当前情景下的主要价格驱动力分布</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 2: 历史回溯 -->
+            <div id="history" class="tab-content space-y-6">
+                 <!-- 模块介绍 -->
+                 <div class="mb-6">
+                    <h2 class="text-xl font-bold text-slate-800">历史相似度匹配 (DTW算法)</h2>
+                    <p class="text-sm text-slate-500 mt-1">基于当前输入的情景参数，系统使用动态时间规整(DTW)算法在历史数据库中匹配最相似的宏观/地缘事件，并展示当时的原油价格实际冲击幅度和修复周期，为您提供实证参考。</p>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-premium border border-slate-100 overflow-hidden">
+                    <div class="p-5 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                        <h3 class="font-semibold text-slate-800">高相似度历史事件列表</h3>
+                        <span class="text-xs text-slate-500 px-2 py-1 bg-white rounded border border-slate-200 shadow-sm"><i class="fa-solid fa-filter text-citi-blue"></i> 相似度 > 75%</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm text-left">
+                            <thead class="text-xs text-slate-500 uppercase bg-slate-50/80 border-b border-slate-200">
+                                <tr>
+                                    <th scope="col" class="px-6 py-4 font-medium">历史事件</th>
+                                    <th scope="col" class="px-6 py-4 font-medium">发生时期</th>
+                                    <th scope="col" class="px-6 py-4 font-medium">最大回撤/涨幅</th>
+                                    <th scope="col" class="px-6 py-4 font-medium">修复周期(天)</th>
+                                    <th scope="col" class="px-6 py-4 text-right font-medium">多维特征相似度</th>
+                                </tr>
+                            </thead>
+                            <tbody id="historyTableBody" class="divide-y divide-slate-100">
+                                <!-- JS 动态注入 -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 3: 对冲策略 -->
+            <div id="strategy" class="tab-content space-y-6">
+                <!-- 模块介绍 -->
+                <div class="mb-6">
+                    <h2 class="text-xl font-bold text-slate-800">衍生品对冲执行建议</h2>
+                    <p class="text-sm text-slate-500 mt-1">综合当前风险敞口预判和企业套期保值需求，系统自动生成期权与期货组合策略。点击策略卡片可查看具体开仓比例及希腊字母(Greeks)敏感性分析。</p>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6" id="strategyContainer">
+                    <!-- JS 动态更新策略卡片 -->
+                </div>
+                
+                <div class="mt-6 bg-blue-50 border border-blue-100 rounded-xl p-5 flex items-start">
+                    <i class="fa-solid fa-circle-info text-citi-accent mt-0.5 mr-3 text-lg"></i>
+                    <div>
+                        <h4 class="text-sm font-semibold text-citi-dark">智能调度提示</h4>
+                        <p class="text-xs text-slate-600 mt-1" id="strategyCommentary">基于当前中度风险预估，建议企业维持 40% 的现货敞口，剩余采用“领口期权”策略锁定价格上限，兼顾下方下跌带来的采购成本优化。</p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- 交互逻辑脚本 -->
+    <script>
+        // === 状态管理 ===
+        const state = {
+            scenario: 'base',
+            geoRisk: 0.5,
+            sentiment: 0.5,
+            results: {
+                currentPrice: 82.50,
+                predictedPrice: 85.42,
+                volatility: 24.5,
+                var95: -4.2,
+                riskLevel: 'mid' // low, mid, high
+            }
+        };
+
+        // === DOM 元素缓存 ===
+        const geoSlider = document.getElementById('geoSlider');
+        const sentimentSlider = document.getElementById('sentimentSlider');
+        const geoValueLabel = document.getElementById('geoValueLabel');
+        const sentimentValueLabel = document.getElementById('sentimentValueLabel');
+        const simBtn = document.getElementById('runSimBtn');
+        const mainLoader = document.getElementById('mainLoader');
+        
+        // 图表实例引用
+        let forecastChartInstance = null;
+        let radarChartInstance = null;
+
+        // === 基础交互监听 ===
+
+        // 标签页切换逻辑
+        function switchTab(tabId) {
+            // 更新按钮样式
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                if(btn.dataset.target === tabId) {
+                    btn.classList.add('text-citi-blue', 'bg-citi-light', 'active');
+                    btn.classList.remove('text-slate-500', 'hover:bg-slate-50');
+                } else {
+                    btn.classList.remove('text-citi-blue', 'bg-citi-light', 'active');
+                    btn.classList.add('text-slate-500', 'hover:bg-slate-50');
+                }
+            });
+            // 更新内容可见性
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById(tabId).classList.add('active');
+        }
+
+        // 滑块交互
+        geoSlider.addEventListener('input', (e) => {
+            const val = e.target.value / 100;
+            state.geoRisk = val;
+            geoValueLabel.innerText = val.toFixed(2);
+            if(val > 0.7) geoValueLabel.className = 'text-xs font-bold font-mono px-2 py-0.5 rounded-md bg-red-50 text-red-600 border border-red-200';
+            else if(val < 0.3) geoValueLabel.className = 'text-xs font-bold font-mono px-2 py-0.5 rounded-md bg-green-50 text-green-600 border border-green-200';
+            else geoValueLabel.className = 'text-xs font-bold font-mono px-2 py-0.5 rounded-md bg-white text-slate-700 border border-slate-200';
+        });
+
+        sentimentSlider.addEventListener('input', (e) => {
+            const val = e.target.value / 100;
+            state.sentiment = val;
+            sentimentValueLabel.innerText = val.toFixed(2);
+            // 情绪指数低代表恐慌(风险高)
+            if(val < 0.3) sentimentValueLabel.className = 'text-xs font-bold font-mono px-2 py-0.5 rounded-md bg-red-50 text-red-600 border border-red-200';
+            else if(val > 0.7) sentimentValueLabel.className = 'text-xs font-bold font-mono px-2 py-0.5 rounded-md bg-green-50 text-green-600 border border-green-200';
+            else sentimentValueLabel.className = 'text-xs font-bold font-mono px-2 py-0.5 rounded-md bg-white text-slate-700 border border-slate-200';
+        });
+
+        // 情景单选监听
+        document.querySelectorAll('input[name="scenario"]').forEach(radio => {
+            radio.addEventListener('change', (e) => {
+                state.scenario = e.target.value;
+            });
+        });
+
+        // === 动画辅助函数：数字滚动 ===
+        function animateValue(obj, start, end, duration, prefix="", suffix="", decimals=2) {
+            let startTimestamp = null;
+            const step = (timestamp) => {
+                if (!startTimestamp) startTimestamp = timestamp;
+                const progress = Math.min((timestamp - startTimestamp) / duration, 1);
+                // 使用 easeOutQuart 缓动函数让滚动更平滑自然
+                const easeOut = 1 - Math.pow(1 - progress, 4); 
+                const current = (progress * (end - start) + start).toFixed(decimals);
+                obj.innerHTML = prefix + current + suffix;
+                if (progress < 1) {
+                    window.requestAnimationFrame(step);
+                }
+            };
+            window.requestAnimationFrame(step);
+        }
+
+        // === 核心业务逻辑：运行模拟推演 ===
+        function runSimulation() {
+            // UI Loading 状态
+            const icon = document.getElementById('btnIcon');
+            const spinner = document.getElementById('btnSpinner');
+            const text = document.getElementById('btnText');
+            
+            simBtn.disabled = true;
+            icon.classList.add('hidden');
+            spinner.classList.remove('hidden');
+            text.innerText = '量化计算中...';
+            simBtn.classList.remove('hover:-translate-y-0.5'); // 停止悬浮动画
+            
+            // 显示主区遮罩
+            mainLoader.classList.remove('hidden');
+            mainLoader.classList.add('flex');
+
+            // 模拟API请求延迟
+            setTimeout(() => {
+                calculateEngineData();
+                updateUI();
+                updateCharts();
+                updateHistoryTable();
+                updateStrategyView();
+                
+                // 恢复 UI 状态
+                simBtn.disabled = false;
+                spinner.classList.add('hidden');
+                icon.classList.remove('hidden');
+                text.innerText = '运行引擎推演';
+                mainLoader.classList.add('hidden');
+                mainLoader.classList.remove('flex');
+            }, 800);
+        }
+
+        // 根据状态计算新的结果数据
+        function calculateEngineData() {
+            let basePredict = 82.50; 
+            let vol = 20;
+            let risk = 'low';
+
+            // 情景基础调整
+            if(state.scenario === 'geopolitics') { basePredict += 12; vol += 15; risk = 'high'; }
+            else if(state.scenario === 'demand_slump') { basePredict -= 15; vol += 10; risk = 'high'; }
+            else { basePredict += 2; vol += 5; risk = 'mid'; }
+
+            // 因子叠加 (地缘越高中枢越高，情绪越恐慌中枢越波动)
+            basePredict += (state.geoRisk - 0.5) * 20;
+            vol += (0.5 - state.sentiment) * 10;
+            
+            // 综合判断风险
+            if(vol > 35 || basePredict > 105) risk = 'high';
+            else if(vol < 22 && basePredict < 90) risk = 'low';
+            else risk = 'mid';
+
+            state.results = {
+                currentPrice: 82.50,
+                predictedPrice: basePredict,
+                volatility: Math.max(vol, 12),
+                var95: -((basePredict * (Math.max(vol,12)/100)) * 1.645 * Math.sqrt(30/252)).toFixed(2), // 简化的VaR计算
+                riskLevel: risk
+            };
+        }
+
+        // 更新头部指标面板
+        function updateUI() {
+            const priceEl = document.getElementById('kpi-price');
+            const volEl = document.getElementById('kpi-volatility');
+            const varEl = document.getElementById('kpi-var');
+            const changeEl = document.getElementById('kpi-price-change');
+            const badgeEl = document.getElementById('kpi-risk-badge');
+
+            // 数字动画滚动
+            animateValue(priceEl, parseFloat(priceEl.innerText) || 82.50, state.results.predictedPrice, 1000);
+            animateValue(volEl, parseFloat(volEl.innerText) || 20, state.results.volatility, 1000, "", "", 1);
+            animateValue(varEl, parseFloat(varEl.innerText.replace('-$','')) || 0, Math.abs(state.results.var95), 1000, "-$");
+
+            // 涨跌幅计算
+            const changePct = ((state.results.predictedPrice - state.results.currentPrice) / state.results.currentPrice * 100).toFixed(1);
+            if(changePct >= 0) {
+                changeEl.innerHTML = `<i class="fa-solid fa-arrow-up text-[10px]"></i> +${changePct}%`;
+                changeEl.className = 'text-sm ml-2 font-medium text-risk-high';
+            } else {
+                changeEl.innerHTML = `<i class="fa-solid fa-arrow-down text-[10px]"></i> ${changePct}%`;
+                changeEl.className = 'text-sm ml-2 font-medium text-risk-low';
+            }
+
+            // 徽章更新
+            if(state.results.riskLevel === 'high') {
+                badgeEl.className = 'inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold bg-red-100 text-red-700 border border-red-200';
+                badgeEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-red-500 mr-2 animate-pulse"></span> 极高风险 (Red)';
+            } else if(state.results.riskLevel === 'low') {
+                badgeEl.className = 'inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold bg-green-100 text-green-700 border border-green-200';
+                badgeEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-green-500 mr-2"></span> 稳健区间 (Green)';
+            } else {
+                badgeEl.className = 'inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold bg-orange-100 text-orange-700 border border-orange-200';
+                badgeEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-orange-500 mr-2"></span> 中度预警 (Amber)';
+            }
+        }
+
+        // === 图表初始化与更新 (Chart.js) ===
+        function initCharts() {
+            // 全局配置默认值提升质感
+            Chart.defaults.font.family = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+            Chart.defaults.color = '#64748B';
+            Chart.defaults.scale.grid.color = 'rgba(0,0,0,0.04)';
+
+            // 1. 价格预测折线图
+            const ctx1 = document.getElementById('priceForecastChart').getContext('2d');
+            
+            // 创建漂亮的渐变色
+            const gradientFill = ctx1.createLinearGradient(0, 0, 0, 400);
+            gradientFill.addColorStop(0, 'rgba(0, 180, 229, 0.4)'); // 花旗亮蓝透明
+            gradientFill.addColorStop(1, 'rgba(0, 180, 229, 0.0)');
+
+            forecastChartInstance = new Chart(ctx1, {
+                type: 'line',
+                data: {
+                    labels: ['T+0', 'T+15', 'T+30', 'T+45', 'T+60', 'T+75', 'T+90'],
+                    datasets: [
+                        {
+                            label: '中枢预测轨迹',
+                            data: [82.5, 83.0, 84.5, 85.0, 84.2, 85.5, 86.0],
+                            borderColor: '#003B70', // 花旗深蓝
+                            borderWidth: 3,
+                            tension: 0.4,
+                            pointRadius: 0,
+                            pointHoverRadius: 6,
+                            pointBackgroundColor: '#fff',
+                            pointBorderColor: '#003B70',
+                            pointBorderWidth: 2,
+                            fill: false,
+                            zIndex: 2
+                        },
+                        {
+                            label: '95% 置信区间上轨',
+                            data: [82.5, 86.0, 89.5, 92.0, 93.2, 95.5, 97.0],
+                            borderColor: 'transparent',
+                            backgroundColor: gradientFill,
+                            fill: '-1', // 填充至下一条线(下轨)
+                            tension: 0.4,
+                            pointRadius: 0,
+                            zIndex: 1
+                        },
+                        {
+                            label: '95% 置信区间下轨',
+                            data: [82.5, 80.0, 79.5, 78.0, 75.2, 75.5, 75.0],
+                            borderColor: 'transparent',
+                            backgroundColor: 'transparent',
+                            tension: 0.4,
+                            pointRadius: 0,
+                            zIndex: 1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                            titleColor: '#0F172A',
+                            bodyColor: '#334155',
+                            borderColor: '#E2E8F0',
+                            borderWidth: 1,
+                            padding: 12,
+                            boxPadding: 4,
+                            usePointStyle: true,
+                            bodyFont: { size: 13, weight: '500' },
+                            titleFont: { size: 12, weight: 'normal', color: '#64748B' },
+                            callbacks: {
+                                label: function(context) {
+                                    if(context.datasetIndex === 1 || context.datasetIndex === 2) {
+                                        return context.dataset.label.replace('95% 置信区间', '') + ': $' + context.parsed.y.toFixed(2);
+                                    }
+                                    return context.dataset.label + ': $' + context.parsed.y.toFixed(2);
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            border: { display: false },
+                            ticks: { padding: 10, callback: (value) => '$' + value }
+                        },
+                        x: {
+                            border: { display: false },
+                            grid: { display: false }
+                        }
+                    }
+                }
+            });
+
+            // 2. 风险雷达图
+            const ctx2 = document.getElementById('riskFactorChart').getContext('2d');
+            radarChartInstance = new Chart(ctx2, {
+                type: 'radar',
+                data: {
+                    labels: ['地缘政治', '市场情绪', '宏观衰退', 'OPEC+ 减产', '航运中断'],
+                    datasets: [{
+                        label: '当前风险暴露',
+                        data: [50, 50, 40, 60, 30],
+                        backgroundColor: 'rgba(0, 180, 229, 0.2)',
+                        borderColor: '#00B4E5',
+                        pointBackgroundColor: '#003B70',
+                        pointBorderColor: '#fff',
+                        pointHoverBackgroundColor: '#fff',
+                        pointHoverBorderColor: '#003B70',
+                        borderWidth: 2,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(0, 59, 112, 0.9)', // 花旗蓝底色
+                            padding: 10,
+                            bodyFont: { size: 13 }
+                        }
+                    },
+                    scales: {
+                        r: {
+                            angleLines: { color: 'rgba(0,0,0,0.05)' },
+                            grid: { color: 'rgba(0,0,0,0.05)' },
+                            pointLabels: {
+                                font: { size: 11, weight: '600' },
+                                color: '#475569'
+                            },
+                            ticks: { display: false, min: 0, max: 100 }
+                        }
+                    }
+                }
+            });
+        }
+
+        // 动态更新图表数据
+        function updateCharts() {
+            const bp = state.results.predictedPrice;
+            const vol = state.results.volatility;
+            const spread = bp * (vol / 100) * 1.5; // 近似计算喇叭口扩展范围
+            
+            // 构造新的轨迹
+            const newData = [82.5];
+            const upper = [82.5];
+            const lower = [82.5];
+            
+            for(let i=1; i<=6; i++) {
+                // 生成平滑的趋势线
+                let step = 82.5 + ((bp - 82.5) / 6) * i;
+                // 添加一点随机波动使其看起来更真实
+                step += (Math.random() - 0.5) * 2;
+                newData.push(step);
+                
+                let curSpread = (spread / 6) * i;
+                upper.push(step + curSpread);
+                lower.push(step - curSpread);
+            }
+
+            forecastChartInstance.data.datasets[0].data = newData;
+            forecastChartInstance.data.datasets[1].data = upper;
+            forecastChartInstance.data.datasets[2].data = lower;
+            
+            // 改变线条颜色基于风险
+            if(state.results.riskLevel === 'high') {
+                forecastChartInstance.data.datasets[0].borderColor = '#EF4444'; // Red
+                forecastChartInstance.data.datasets[0].pointBorderColor = '#EF4444';
+            } else if (state.results.riskLevel === 'low') {
+                forecastChartInstance.data.datasets[0].borderColor = '#10B981'; // Green
+                forecastChartInstance.data.datasets[0].pointBorderColor = '#10B981';
+            } else {
+                forecastChartInstance.data.datasets[0].borderColor = '#003B70'; // Default Citi Blue
+                forecastChartInstance.data.datasets[0].pointBorderColor = '#003B70';
+            }
+
+            forecastChartInstance.update();
+
+            // 更新雷达图数据
+            const geo = state.geoRisk * 100;
+            const sent = (1 - state.sentiment) * 100; // 情绪越低(恐慌)风险越高
+            let macro = 40, opec = 60, ship = 30;
+            
+            if(state.scenario === 'geopolitics') { ship = 85; macro = 50; opec = 70; }
+            if(state.scenario === 'demand_slump') { macro = 95; ship = 20; opec = 80; }
+
+            radarChartInstance.data.datasets[0].data = [geo, sent, macro, opec, ship];
+            
+            if(state.results.riskLevel === 'high') {
+                radarChartInstance.data.datasets[0].backgroundColor = 'rgba(239, 68, 68, 0.2)';
+                radarChartInstance.data.datasets[0].borderColor = '#EF4444';
+            } else {
+                radarChartInstance.data.datasets[0].backgroundColor = 'rgba(0, 180, 229, 0.2)';
+                radarChartInstance.data.datasets[0].borderColor = '#00B4E5';
+            }
+            radarChartInstance.update();
+        }
+
+        // === 更新表格与策略 (DOM 注入) ===
+        function updateHistoryTable() {
+            const tbody = document.getElementById('historyTableBody');
+            
+            // 根据不同情景准备虚拟的历史数据
+            const db = {
+                'base': [
+                    { event: '后疫情弱复苏期', date: '2023 Q3', impact: '+8.5%', days: 45, score: '88%' },
+                    { event: '中美贸易摩擦缓和期', date: '2019 Q4', impact: '+5.2%', days: 30, score: '82%' }
+                ],
+                'geopolitics': [
+                    { event: '俄乌冲突爆发', date: '2022 Feb', impact: '+35.4%', days: 120, score: '94%' },
+                    { event: '沙特石油设施遇袭', date: '2019 Sep', impact: '+14.6%', days: 15, score: '87%' },
+                    { event: '伊拉克战争前期', date: '2003 Jan', impact: '+22.1%', days: 60, score: '81%' }
+                ],
+                'demand_slump': [
+                    { event: 'COVID-19 全球封锁', date: '2020 Mar', impact: '-65.2%', days: 180, score: '91%' },
+                    { event: '2008次贷危机波及', date: '2008 Oct', impact: '-70.5%', days: 240, score: '86%' }
+                ]
+            };
+
+            const data = db[state.scenario];
+            tbody.innerHTML = '';
+            
+            data.forEach((row, index) => {
+                // 颜色处理
+                let impactColor = row.impact.includes('+') ? 'text-risk-high' : 'text-risk-low';
+                // 动画延迟
+                let delay = index * 100;
+                
+                const tr = document.createElement('tr');
+                tr.className = `hover:bg-slate-50 transition-colors opacity-0 animate-[fadeIn_0.4s_ease-out_forwards]`;
+                tr.style.animationDelay = `${delay}ms`;
+                tr.innerHTML = `
+                    <td class="px-6 py-4 font-medium text-slate-800">${row.event}</td>
+                    <td class="px-6 py-4 text-slate-500">${row.date}</td>
+                    <td class="px-6 py-4 font-bold ${impactColor} font-mono">${row.impact}</td>
+                    <td class="px-6 py-4 text-slate-500">${row.days}</td>
+                    <td class="px-6 py-4 text-right">
+                        <span class="inline-block w-full bg-slate-200 rounded-full h-1.5 mt-2 mr-2 max-w-[50px] align-middle">
+                            <span class="bg-citi-accent h-1.5 rounded-full block" style="width: ${row.score}"></span>
+                        </span>
+                        <span class="font-mono text-citi-blue font-semibold">${row.score}</span>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function updateStrategyView() {
+            const container = document.getElementById('strategyContainer');
+            const commentary = document.getElementById('strategyCommentary');
+            
+            let strategies = [];
+            
+            if(state.results.riskLevel === 'high' && state.results.predictedPrice > 90) {
+                commentary.innerText = "侦测到上行极端尾部风险！建议立即买入虚值看涨期权(OTM Call)以防范采购成本剧增，同时利用期货多头锁定未来3个月核心需求。";
+                strategies = [
+                    { name: '买入 OTM 看涨期权', target: '防范现货逼空', ratio: '60%', greeks: 'Delta +0.35 | Gamma 较高', type: 'buy' },
+                    { name: '期货多头建仓 (T+3)', target: '锁定刚性采购成本', ratio: '40%', greeks: 'Delta +1.00', type: 'buy' }
+                ];
+            } else if (state.results.riskLevel === 'high' && state.results.predictedPrice < 70) {
+                commentary.innerText = "宏观衰退信号强烈，油价面临深度回调。建议减少实物库存，对于产油企业/库存方，强烈建议买入看跌期权(Put)保护下行风险。";
+                strategies = [
+                    { name: '买入 ITM 看跌期权', target: '库存价值保护', ratio: '70%', greeks: 'Delta -0.65 | Vega 受益', type: 'sell' },
+                    { name: '现货去库存', target: '减少资金占用', ratio: '30%', greeks: 'N/A', type: 'sell' }
+                ];
+            } else {
+                commentary.innerText = "当前预期维持震荡上行格局。建议采用低成本的领口期权(Collar)策略：买入看涨期权锁定上限，同时卖出看跌期权补贴期权费。";
+                strategies = [
+                    { name: '零成本领口期权 (Collar)', target: '限制价格波动区间', ratio: '80%', greeks: 'Delta 中性 | Theta 收益', type: 'neutral' },
+                    { name: '现货滚动采购', target: '平滑均价', ratio: '20%', greeks: 'N/A', type: 'neutral' }
+                ];
+            }
+
+            container.innerHTML = '';
+            strategies.forEach((strat, idx) => {
+                let badgeClass = strat.type === 'buy' ? 'bg-red-50 text-red-600 border-red-200' : 
+                                strat.type === 'sell' ? 'bg-green-50 text-green-600 border-green-200' : 
+                                'bg-blue-50 text-citi-blue border-blue-200';
+                let icon = strat.type === 'buy' ? 'fa-arrow-trend-up' : strat.type === 'sell' ? 'fa-arrow-trend-down' : 'fa-arrows-left-right';
+                
+                let delay = idx * 150;
+
+                container.innerHTML += `
+                    <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow cursor-pointer opacity-0 animate-[slideUp_0.5s_ease-out_forwards]" style="animation-delay: ${delay}ms">
+                        <div class="flex justify-between items-start mb-4">
+                            <div>
+                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${badgeClass} mb-2">
+                                    <i class="fa-solid ${icon} mr-1"></i> 执行优先级 ${idx + 1}
+                                </span>
+                                <h3 class="font-bold text-lg text-slate-800">${strat.name}</h3>
+                            </div>
+                            <div class="text-right">
+                                <span class="text-2xl font-black font-mono text-slate-800">${strat.ratio}</span>
+                                <p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">推荐资金分配</p>
+                            </div>
+                        </div>
+                        <div class="space-y-2 mt-4">
+                            <div class="flex justify-between text-sm border-b border-slate-100 pb-2">
+                                <span class="text-slate-500">对冲目标</span>
+                                <span class="font-medium text-slate-700">${strat.target}</span>
+                            </div>
+                            <div class="flex justify-between text-sm pt-1">
+                                <span class="text-slate-500">Greeks 参数</span>
+                                <span class="font-mono text-xs text-slate-600 bg-slate-100 px-2 py-0.5 rounded">${strat.greeks}</span>
+                            </div>
+                        </div>
+                        <button class="mt-5 w-full py-2 bg-slate-50 hover:bg-slate-100 text-citi-blue text-sm font-semibold rounded-lg border border-slate-200 transition-colors">
+                            查看执行明细方案 <i class="fa-solid fa-chevron-right text-[10px] ml-1"></i>
+                        </button>
+                    </div>
+                `;
+            });
+        }
+
+        // === 页面初始化执行 ===
+        window.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+            runSimulation(); // 初始加载执行一次测算
+        });
+    </script>
+</body>
+</html>
